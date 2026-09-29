@@ -1,5 +1,6 @@
 import Aedes from 'aedes';
 import { createServer } from 'http';
+import { createServer as createTcpServer } from 'net';
 import { WebSocketServer } from 'ws';
 import { Duplex } from 'stream';
 import { verifyAuthToken } from '@michaelhart/meshcore-decoder';
@@ -15,6 +16,8 @@ const abuseConfig = loadAbuseConfig();
 const subscriberConfig = loadSubscriberConfig();
 
 const WS_PORT = mqttConfig.wsPort;
+const TCP_PORT = mqttConfig.tcpPort;
+const TCP_TRUSTED_PROXY = process.env.MQTT_TCP_TRUSTED_PROXY || '';
 const HOST = mqttConfig.host;
 const EXPECTED_AUDIENCE = mqttConfig.expectedAudience;
 
@@ -38,12 +41,13 @@ enum ClientType {
 enum SubscriberRole {
   ADMIN = 1,           // Full access + can delete retained messages
   FULL_ACCESS = 2,     // Full access, no hidden data
-  LIMITED = 3          // All access but with hidden/sensitive data filtered
+  LIMITED = 3,         // All access but with hidden/sensitive data filtered
+  BRIDGE = 9           // Full bridge access: subscribe and publish to any topic
 }
 
 // Load subscriber users from environment variables
 // Format: SUBSCRIBER_1=username:password:role:maxConnections, SUBSCRIBER_2=username:password:role:maxConnections, etc.
-// Role: 1=admin (full+delete), 2=full_access (no hidden data), 3=limited (filtered data)
+// Role: 1=admin (full+delete), 2=full_access (no hidden data), 3=limited (filtered data), 9=bridge
 // maxConnections: number for override, D or omit to use default
 const subscriberUsers = new Map<string, string>();
 const subscriberRoles = new Map<string, SubscriberRole>();
@@ -72,7 +76,7 @@ while (true) {
     let role = SubscriberRole.LIMITED;
     if (roleStr) {
       const roleNum = parseInt(roleStr);
-      if (roleNum === 1 || roleNum === 2 || roleNum === 3) {
+      if (roleNum === 1 || roleNum === 2 || roleNum === 3 || roleNum === 9) {
         role = roleNum as SubscriberRole;
       }
     }
@@ -94,7 +98,8 @@ while (true) {
     const roleNames = {
       [SubscriberRole.ADMIN]: 'admin',
       [SubscriberRole.FULL_ACCESS]: 'full_access', 
-      [SubscriberRole.LIMITED]: 'limited'
+      [SubscriberRole.LIMITED]: 'limited',
+      [SubscriberRole.BRIDGE]: 'bridge'
     };
     console.log(`[CONFIG] Loaded subscriber user: ${username} (role: ${roleNames[role]}, maxConnections: ${maxConn})`);
   } else {
@@ -261,17 +266,23 @@ aedes.authorizePublish = (client, packet, callback) => {
   // Important: Strip retain flag from /status messages to prevent stale data on ingestor restart
   // LWT (offline) messages are also STATUS messages and should NOT be retained
   if (packet.topic.endsWith('/status') && packet.retain) {
-    console.log(`${logPrefix} [AUTHZ] Stripping retain flag from STATUS message -> ${packet.topic}`);
+    // console.log(`${logPrefix} [AUTHZ] Stripping retain flag from STATUS message -> ${packet.topic}`);
     packet.retain = false;
   }
   
   // Subscriber clients cannot publish (subscribe-only)
   if (clientType === ClientType.SUBSCRIBER) {
     const role = (client as any).role || SubscriberRole.LIMITED;
+
+    if (role === SubscriberRole.BRIDGE) {
+      // console.log(`${logPrefix} [AUTHZ] ✓ Bridge publish authorized -> ${packet.topic}`);
+      callback(null);
+      return;
+    }
     
     // Admin subscribers (role 1) can publish empty retained messages to delete them
     if (role === SubscriberRole.ADMIN && packet.retain && packet.payload.length === 0) {
-      console.log(`${logPrefix} [AUTHZ] ✓ Admin delete authorized -> ${packet.topic}`);
+      // console.log(`${logPrefix} [AUTHZ] ✓ Admin delete authorized -> ${packet.topic}`);
       callback(null);
       return;
     }
@@ -288,7 +299,7 @@ aedes.authorizePublish = (client, packet, callback) => {
         const isValidIata = /^[A-Z]{3}$/i.test(iata) || iata.toLowerCase() === 'test';
         const isValidPubKey = /^[0-9A-Fa-f]{64}$/.test(publicKey);
         if (isValidIata && isValidPubKey) {
-          console.log(`${logPrefix} [AUTHZ] ✓ Admin serial command authorized -> ${packet.topic}`);
+          // console.log(`${logPrefix} [AUTHZ] ✓ Admin serial command authorized -> ${packet.topic}`);
           callback(null);
           return;
         }
@@ -341,7 +352,7 @@ aedes.authorizePublish = (client, packet, callback) => {
     const isTestRegion = locationCode.toLowerCase() === 'test';
     
     if (isTestRegion) {
-      console.log(`${logPrefix} [AUTHZ] ✓ Using test region -> ${packet.topic}`);
+      // console.log(`${logPrefix} [AUTHZ] ✓ Using test region -> ${packet.topic}`);
       // Continue to validation, don't return here
     } else {
       // First check format (must be 3 uppercase letters, no normalization)
@@ -404,7 +415,7 @@ aedes.authorizePublish = (client, packet, callback) => {
     
     // Update the packet topic to the normalized version
     if (packet.topic !== normalizedTopic) {
-      console.log(`${logPrefix} [AUTHZ] Normalized topic: ${packet.topic} -> ${normalizedTopic}`);
+      // console.log(`${logPrefix} [AUTHZ] Normalized topic: ${packet.topic} -> ${normalizedTopic}`);
       packet.topic = normalizedTopic;
     }
 
@@ -427,7 +438,7 @@ aedes.authorizePublish = (client, packet, callback) => {
         callback(new Error('serial/responses payload must be a valid JWT'));
         return;
       }
-      console.log(`${logPrefix} [AUTHZ] ✓ Publish authorized (serial response) -> ${packet.topic}`);
+      // console.log(`${logPrefix} [AUTHZ] ✓ Publish authorized (serial response) -> ${packet.topic}`);
       callback(null);
       return;
     }
@@ -466,7 +477,7 @@ aedes.authorizePublish = (client, packet, callback) => {
         abuseDetector.recordPacket(client, packet);
       }
       
-      console.log(`${logPrefix} [AUTHZ] ✓ Publish authorized -> ${packet.topic}`);
+      // console.log(`${logPrefix} [AUTHZ] ✓ Publish authorized -> ${packet.topic}`);
       
       // Publish JWT payload to /internal topic (ADMIN-only, contains PII)
       const tokenPayload = (client as any).tokenPayload;
@@ -564,6 +575,13 @@ aedes.authorizeSubscribe = (client, subscription, callback) => {
   
   const logPrefix = getClientLogPrefix(client);
   const clientType = (client as any).clientType;
+  const role = (client as any).role;
+
+  if (clientType === ClientType.SUBSCRIBER && role === SubscriberRole.BRIDGE) {
+    console.log(`${logPrefix} [AUTHZ] ✓ Bridge subscribe authorized -> ${subscription.topic}`);
+    callback(null, subscription);
+    return;
+  }
   
   // Publisher clients cannot subscribe (publish-only) - EXCEPT their own serial/commands topic
   if (clientType === ClientType.PUBLISHER) {
@@ -612,6 +630,10 @@ aedes.authorizeForward = (client, packet) => {
   
   const clientType = (client as any).clientType;
   const role = (client as any).role;
+
+  if (clientType === ClientType.SUBSCRIBER && role === SubscriberRole.BRIDGE) {
+    return packet;
+  }
   
   // Block $SYS/* messages for non-admin subscribers (only role 1 can see system topics)
   if (clientType === ClientType.SUBSCRIBER && role !== SubscriberRole.ADMIN) {
@@ -813,12 +835,34 @@ aedes.on('clientError', (client, err) => {
   console.log(`${logPrefix} [ERROR] Client error: ${err.message}`);
 });
 
+const tcpServer = TCP_PORT > 0 ? createTcpServer((stream) => {
+  const clientIP = stream.remoteAddress || 'unknown';
+
+  if (clientIP !== '127.0.0.1' && clientIP !== '::1' && clientIP !== '::ffff:127.0.0.1' && clientIP !== TCP_TRUSTED_PROXY) {
+    console.log(`[TCP] Rejecting non-local connection from ${clientIP}`);
+    stream.destroy();
+    return;
+  }
+
+  console.log(`[TCP] New MQTT connection from ${clientIP}`);
+  (stream as any).clientIP = clientIP;
+  (stream as any).authenticated = false;
+  aedes.handle(stream);
+}) : null;
+
+if (tcpServer) {
+  tcpServer.on('error', (error) => {
+    console.error('[TCP] Server error:', error);
+  });
+}
+
+
 // Create HTTP server for WebSocket
 const httpServer = createServer((req, res) => {
   // If this is not a WebSocket upgrade request, redirect to analyzer
   if (!req.headers.upgrade || req.headers.upgrade.toLowerCase() !== 'websocket') {
     console.log(`[HTTP] Non-WebSocket request from ${getClientIP(req)}, redirecting to analyzer`);
-    res.writeHead(301, { 'Location': 'https://analyzer.letsmesh.net/' });
+    res.writeHead(301, { 'Location': 'https://corescope.meshcore.fi/' });
     res.end();
     return;
   }
@@ -830,7 +874,7 @@ const wsServer = new WebSocketServer({ server: httpServer });
 wsServer.on('connection', (ws, req) => {
   try {
     const clientIP = getClientIP(req);
-    
+    console.log(`Connection from ${clientIP}`); 
     // Check if IP is blocked
     if (rateLimiter.isBlocked(clientIP)) {
       console.log(`[RATE_LIMIT] Rejecting connection from blocked IP: ${clientIP}`);
@@ -896,6 +940,7 @@ wsServer.on('connection', (ws, req) => {
 
   // Forward WebSocket messages to the stream
   ws.on('message', (data) => {
+    // console.log(`Data: ${data}`);
     // Log MQTT PINGREQ packets (0xC0 = PINGREQ) with client identifier
     if (data instanceof Buffer && data.length >= 2 && data[0] === 0xC0) {
       const clientInfo = (stream as any).client;
@@ -967,6 +1012,11 @@ httpServer.listen(WS_PORT, HOST, () => {
   console.log('║         MeshCore MQTT Broker (WebSocket)                  ║');
   console.log('╚════════════════════════════════════════════════════════════╝');
   console.log(`WebSocket MQTT listening on: ws://${HOST}:${WS_PORT}`);
+  if (tcpServer) {
+    console.log(`TCP MQTT listening on: mqtt://${HOST}:${TCP_PORT}`);
+  } else {
+    console.log('TCP MQTT listener disabled (set MQTT_TCP_PORT to enable)');
+  }
   console.log('');
   console.log('Authentication Modes:');
   console.log(`  1. Subscribers (Subscribe-only): ${subscriberUsers.size} user(s) configured`);
@@ -984,10 +1034,15 @@ httpServer.listen(WS_PORT, HOST, () => {
   console.log('Ready to accept connections...');
 });
 
+if (tcpServer) {
+  tcpServer.listen(TCP_PORT, HOST);
+}
+
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[SHUTDOWN] Closing MQTT broker...');
   abuseDetector.shutdown();
+  tcpServer?.close();
   aedes.close(() => {
     console.log('[SHUTDOWN] Broker closed');
     process.exit(0);
@@ -997,6 +1052,7 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
   console.log('\n[SHUTDOWN] Closing MQTT broker...');
   abuseDetector.shutdown();
+  tcpServer?.close();
   aedes.close(() => {
     console.log('[SHUTDOWN] Broker closed');
     process.exit(0);

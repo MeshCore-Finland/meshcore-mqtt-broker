@@ -1,0 +1,15 @@
+.git
+.env
+.enc
+node_modules
+dist
+data
+*.db
+*.db-shm
+*.db-wal
+*.log
+npm-debug.log*
+Dockerfile*
+compose*.yml
+compose*.yaml
+docs

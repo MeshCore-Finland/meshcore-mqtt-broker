@@ -1,0 +1,46 @@
+services:
+  broker:
+    build:
+      context: .
+    image: meshcore-mqtt-broker:local
+    container_name: meshcore-mqtt-broker
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # The host .env uses an absolute host path; inside the container the
+      # persisted database is always available at this path.
+      ABUSE_PERSISTENCE_PATH: /data/abuse-detection.db
+      # Listen on the container interface so Docker's published port works.
+      MQTT_HOST: 0.0.0.0
+      MQTT_TCP_TRUSTED_PROXY: 172.20.0.1
+    ports:
+      - "127.0.0.1:${MQTT_WS_PORT:-8883}:${MQTT_WS_PORT:-8883}"
+      - "127.0.0.1:${MQTT_TCP_PORT:-1884}:${MQTT_TCP_PORT:-1884}"
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const http=require('http');
+          const port=Number(process.env.MQTT_WS_PORT||8883);
+          const req=http.get({host:'127.0.0.1',port,path:'/'},res=>process.exit(res.statusCode===301?0:1));
+          req.setTimeout(3000,()=>{req.destroy();process.exit(1)});
+          req.on('error',()=>process.exit(1));
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

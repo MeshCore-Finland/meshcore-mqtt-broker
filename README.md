@@ -56,6 +56,8 @@ Edit `.env`:
 ```bash
 # MQTT Server Settings
 MQTT_WS_PORT=8883
+# Optional localhost-only raw MQTT/TCP listener. Unset or 0 disables it.
+MQTT_TCP_PORT=0
 MQTT_HOST=0.0.0.0
 
 # Authentication Settings
@@ -64,11 +66,12 @@ AUTH_EXPECTED_AUDIENCE=mqtt.yourdomain.com
 
 # Subscribe-Only Users (read-only monitoring accounts)
 # Format: SUBSCRIBER_N=username:password:role
-# Role: 1=admin (full access + delete + PII), 2=full_access (no filtering), 3=limited (filtered)
+# Role: 1=admin (full access + delete + PII), 2=full_access (no filtering), 3=limited (filtered), 9=bridge
 # Add as many as you need by incrementing the number
 SUBSCRIBER_1=admin:your-secure-password-here:1
 SUBSCRIBER_2=viewer:another-secure-password:2
 SUBSCRIBER_3=monitor:yet-another-password:3
+# SUBSCRIBER_4=bridge:bridge-password:9:1
 ```
 
 **Subscribe-only users** can read messages but cannot publish. They're useful for monitoring, debugging, and administrative dashboards.
@@ -77,6 +80,7 @@ SUBSCRIBER_3=monitor:yet-another-password:3
 - **Role 1 (Admin)**: Full access including `/internal` topics (contains PII), `$SYS/*` system topics, and ability to delete retained messages
 - **Role 2 (Full Access)**: Access to all public topics with no data filtering, cannot access `/internal` or `$SYS/*`
 - **Role 3 (Limited)**: Access to public topics only with sensitive data filtered (SNR, RSSI, score, stats, model, firmware_version removed from messages)
+- **Role 9 (Bridge)**: Static-password bridge account with publish and subscribe access to any topic. Use only on trusted localhost/TCP bridges.
 
 ## Installation
 
@@ -166,12 +170,15 @@ Subscribers (read-only users) can subscribe to any topic including wildcards lik
 
 ## Deployment
 
-This project is designed to be deployed via Nixpacks (e.g., to Dokploy) similar to the ingestor project.
+The included Docker Compose deployment reads the existing `.env`, persists the abuse-detection database, restarts the broker unless it is explicitly stopped, and limits retained container logs to approximately 50 MB.
 
-The build process will:
-1. Install dependencies
-2. Compile TypeScript to JavaScript
-3. Run the compiled server
+```bash
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+Enable the Docker service at boot so Compose's `restart: unless-stopped` policy starts the broker after a reboot. See the [operations runbook](docs/runbook.md) for deployment, upgrades, configuration, logs, backups, and troubleshooting.
 
 For setting up with TLS using Cloudflare Tunnels, see [docs/cloudflare-tunnels.md](docs/cloudflare-tunnels.md). This is the recommended way to deploy the MQTT broker.
 
