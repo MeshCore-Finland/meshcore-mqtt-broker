@@ -1,6 +1,7 @@
 .git
 .env
 .enc
+config/access-control.yaml
 node_modules
 dist
 data

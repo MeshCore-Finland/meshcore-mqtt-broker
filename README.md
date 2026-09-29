@@ -43,13 +43,16 @@ The token format is: `header.payload.signature` where the signature is verified 
 
 ## Configuration
 
-All configuration is done via environment variables in a `.env` file.
+Broker settings are configured with environment variables in a `.env` file. The live access-control rules are kept separately in `config/access-control.yaml` so they can be changed without restarting the broker.
 
 Copy `.env.example` to `.env` and configure:
 
 ```bash
 cp .env.example .env
+cp -n config/access-control.example.yaml config/access-control.yaml
 ```
+
+The ACL file controls publisher access. `acceptedIatas` is checked when an authenticated observer publishes, so it does not block MQTT login. `blockedObservers` contains observer public keys that are denied at login; adding a connected observer to this list disconnects it and blocks its publishes. The broker checks the file every five seconds and applies valid updates without a restart. Invalid edits are logged and the last valid ACL remains active. Add `test` to `acceptedIatas` if you need the existing test topic region.
 
 Edit `.env`:
 

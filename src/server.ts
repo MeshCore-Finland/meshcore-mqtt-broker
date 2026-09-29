@@ -9,6 +9,7 @@ import { RateLimiter } from './rate-limiter';
 import { getClientIP } from './ip-utils';
 import { AbuseDetector } from './abuse-detector';
 import { loadMqttConfig, loadAbuseConfig, loadSubscriberConfig } from './config';
+import { AccessControl } from './access-control';
 
 // Load and validate configuration
 const mqttConfig = loadMqttConfig();
@@ -20,6 +21,20 @@ const TCP_PORT = mqttConfig.tcpPort;
 const TCP_TRUSTED_PROXY = process.env.MQTT_TCP_TRUSTED_PROXY || '';
 const HOST = mqttConfig.host;
 const EXPECTED_AUDIENCE = mqttConfig.expectedAudience;
+const ACCESS_CONTROL_FILE = process.env.ACCESS_CONTROL_FILE || './config/access-control.yaml';
+const accessControl = new AccessControl(ACCESS_CONTROL_FILE);
+const activePublisherClients = new Map<string, Set<any>>();
+
+const accessControlReloadTimer = setInterval(() => {
+  const newlyBlocked = accessControl.reload();
+  for (const publicKey of newlyBlocked) {
+    const clients = activePublisherClients.get(publicKey);
+    if (!clients) continue;
+    console.log(`[ACL] Disconnecting ${clients.size} active session(s) for blocked observer ${publicKey.substring(0, 8)}`);
+    for (const client of clients) client.close();
+  }
+}, 5000);
+accessControlReloadTimer.unref();
 
 // Helper function to validate IATA airport codes
 function isValidIATACode(code: string): boolean {
@@ -228,6 +243,12 @@ aedes.authenticate = async (client, username, password, callback) => {
       callback(null, false);
       return;
     }
+
+    if (accessControl.isObserverBlocked(publicKey)) {
+      console.log(`[O:${publicKey.substring(0, 8)}] [AUTH] ✗ Observer is blacklisted`);
+      callback(null, false);
+      return;
+    }
     
     const shortKey = publicKey.substring(0, 8);
     console.log(`[O:${shortKey}] [AUTH] ✓ Publisher authenticated${tokenPayload.aud ? ` [aud: ${tokenPayload.aud}]` : ''}`);
@@ -235,6 +256,9 @@ aedes.authenticate = async (client, username, password, callback) => {
     (client as any).publicKey = publicKey;
     (client as any).tokenPayload = tokenPayload;
     (client as any).clientType = ClientType.PUBLISHER;
+    const publisherSessions = activePublisherClients.get(publicKey) || new Set<any>();
+    publisherSessions.add(client);
+    activePublisherClients.set(publicKey, publisherSessions);
     
     // Mark stream as authenticated
     const stream = (client as any).conn;
@@ -262,6 +286,13 @@ aedes.authorizePublish = (client, packet, callback) => {
   
   const logPrefix = getClientLogPrefix(client);
   const clientType = (client as any).clientType;
+
+  if (clientType === ClientType.PUBLISHER && accessControl.isObserverBlocked((client as any).publicKey || '')) {
+    console.log(`${logPrefix} [AUTHZ] ✗ Publish denied (observer is blacklisted)`);
+    callback(new Error('Observer is blacklisted'));
+    client.close();
+    return;
+  }
   
   // Important: Strip retain flag from /status messages to prevent stale data on ingestor restart
   // LWT (offline) messages are also STATUS messages and should NOT be retained
@@ -378,6 +409,13 @@ aedes.authorizePublish = (client, packet, callback) => {
         return;
       }
     }
+
+    const normalizedLocation = isTestRegion ? 'test' : locationCode.toUpperCase();
+    if (!accessControl.acceptsIata(normalizedLocation)) {
+      console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (IATA is not allowlisted)`);
+      callback(new Error(`IATA ${normalizedLocation} is not accepted by this broker`));
+      return;
+    }
     
     // Validate public key in topic (required - topicParts[2])
     const topicPublicKey = topicParts[2].trim().toUpperCase();
@@ -410,7 +448,6 @@ aedes.authorizePublish = (client, packet, callback) => {
     // Normalize the topic to UPPERCASE for IATA codes and public key component
     // This prevents duplicate topics with different casing (e.g., 7553b337... vs 7553B337...)
     // For the test region, always normalize to lowercase "test"
-    const normalizedLocation = isTestRegion ? 'test' : locationCode.toUpperCase();
     const normalizedTopic = `meshcore/${normalizedLocation}/${clientPublicKey}/${topicParts.slice(3).join('/')}`;
     
     // Update the packet topic to the normalized version
@@ -804,6 +841,12 @@ aedes.on('clientDisconnect', (client) => {
     // Clean up subscriber connection tracking
     const clientType = (client as any).clientType;
     const username = (client as any).username;
+    if (clientType === ClientType.PUBLISHER) {
+      const publicKey = (client as any).publicKey;
+      const publisherSessions = activePublisherClients.get(publicKey);
+      publisherSessions?.delete(client);
+      if (publisherSessions?.size === 0) activePublisherClients.delete(publicKey);
+    }
     if (clientType === ClientType.SUBSCRIBER && username) {
       const activeConns = subscriberActiveConnections.get(username);
       if (activeConns) {

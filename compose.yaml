@@ -15,11 +15,13 @@ services:
       # Listen on the container interface so Docker's published port works.
       MQTT_HOST: 0.0.0.0
       MQTT_TCP_TRUSTED_PROXY: 172.20.0.1
+      ACCESS_CONTROL_FILE: /app/config/access-control.yaml
     ports:
       - "127.0.0.1:${MQTT_WS_PORT:-8883}:${MQTT_WS_PORT:-8883}"
       - "127.0.0.1:${MQTT_TCP_PORT:-1884}:${MQTT_TCP_PORT:-1884}"
     volumes:
       - ./data:/data
+      - ./config:/app/config:ro
     read_only: true
     tmpfs:
       - /tmp

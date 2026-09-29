@@ -1,0 +1,13 @@
+acceptedIatas:
+  - HEL
+  - JOE
+  - KOK
+  - OUL
+  - RVN
+  - SJY
+  - TKU
+  - TLL
+  - TMP
+
+# Observer public keys to reject, in 64-character hexadecimal form.
+blockedObservers: []

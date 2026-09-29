@@ -6,6 +6,7 @@ This deployment uses Docker Compose, reads settings from the existing `.env`, pe
 
 - Docker Engine with the Compose plugin (`docker compose version`)
 - A completed `.env` in the repository root
+- A runtime ACL file copied from `config/access-control.example.yaml`
 - Port `MQTT_WS_PORT` (normally `8883`) available on host loopback
 
 The `.env` is passed to the container at runtime. It is excluded from the image build context and is not copied into the image.
@@ -16,6 +17,7 @@ From the repository root:
 
 ```bash
 chmod 600 .env
+cp -n config/access-control.example.yaml config/access-control.yaml
 docker compose config --quiet
 docker compose build
 docker compose up -d
@@ -77,6 +79,8 @@ docker compose config --quiet
 docker compose up -d --force-recreate broker
 docker compose logs --tail=100 broker
 ```
+
+Edit `config/access-control.yaml` to change the accepted IATAs or blocked observer public keys. The IATA allowlist rejects publish attempts after MQTT login; the observer blacklist rejects login and disconnects observers already connected when they are added. ACL updates are checked every five seconds and take effect without recreating the container. The live file is intentionally excluded from Git and the Docker image; only the example is tracked. Keep the YAML valid: rejected updates are logged and the broker retains the last valid ACL. Add `test` to `acceptedIatas` if the test topic region is needed.
 
 Compose overrides `MQTT_HOST` to `0.0.0.0` inside the container so Docker can forward traffic to it, but publishes that port only as `127.0.0.1` on the host. The broker is therefore reachable by the host-local Caddy TLS proxy and not directly on a public host interface. Compose also maps the existing host `data/` directory to `/data` while overriding `ABUSE_PERSISTENCE_PATH`, so existing host-oriented values in `.env` remain compatible. The optional raw TCP listener binds to loopback inside the container and is not published to the host.
 
