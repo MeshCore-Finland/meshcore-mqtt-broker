@@ -24,6 +24,7 @@ const EXPECTED_AUDIENCE = mqttConfig.expectedAudience;
 const ACCESS_CONTROL_FILE = process.env.ACCESS_CONTROL_FILE || './config/access-control.yaml';
 const accessControl = new AccessControl(ACCESS_CONTROL_FILE);
 const activePublisherClients = new Map<string, Set<any>>();
+const loggedIataRemaps = new Set<string>();
 
 const accessControlReloadTimer = setInterval(() => {
   const newlyBlocked = accessControl.reload();
@@ -410,7 +411,17 @@ aedes.authorizePublish = (client, packet, callback) => {
       }
     }
 
-    const normalizedLocation = isTestRegion ? 'test' : locationCode.toUpperCase();
+    const observerPublicKey = ((client as any).publicKey || '').toUpperCase();
+    const overrideIata = accessControl.getIataOverride(observerPublicKey);
+    const normalizedLocation = overrideIata || (isTestRegion ? 'test' : locationCode.toUpperCase());
+    if (overrideIata && overrideIata !== locationCode.toUpperCase()) {
+      const remapLogKey = `${observerPublicKey}:${locationCode.toUpperCase()}:${overrideIata}`;
+      if (!loggedIataRemaps.has(remapLogKey)) {
+        console.log(`${logPrefix} [ACL] Remapping IATA ${locationCode.toUpperCase()} -> ${overrideIata}`);
+        loggedIataRemaps.add(remapLogKey);
+      }
+    }
+
     if (!accessControl.acceptsIata(normalizedLocation)) {
       console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (IATA is not allowlisted)`);
       callback(new Error(`IATA ${normalizedLocation} is not accepted by this broker`));
@@ -978,6 +989,14 @@ wsServer.on('connection', (ws, req) => {
       } else {
         callback(new Error('WebSocket not open'));
       }
+    },
+    destroy(error, callback) {
+      // Aedes destroys the MQTT stream on client.close(). Close the WebSocket too,
+      // otherwise the peer can keep a stale transport open after its MQTT session ends.
+      if (ws.readyState === ws.OPEN) {
+        ws.close(1000, 'MQTT session closed');
+      }
+      callback(error);
     }
   });
 

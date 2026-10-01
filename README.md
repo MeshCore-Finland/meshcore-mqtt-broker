@@ -52,7 +52,7 @@ cp .env.example .env
 cp -n config/access-control.example.yaml config/access-control.yaml
 ```
 
-The ACL file controls publisher access. `acceptedIatas` is checked when an authenticated observer publishes, so it does not block MQTT login. `blockedObservers` contains observer public keys that are denied at login; adding a connected observer to this list disconnects it and blocks its publishes. The broker checks the file every five seconds and applies valid updates without a restart. Invalid edits are logged and the last valid ACL remains active. Add `test` to `acceptedIatas` if you need the existing test topic region.
+The ACL file is versioned and keeps publisher rules separate from per-observer options. `accepted_iatas` is checked after an authenticated observer publishes, so it does not block MQTT login. `observers` is keyed by public key and supports `blacklist: true` to deny login and disconnect connected observers, or `override_iata: RVN` to remap that observer's topic IATA before the allowlist check. An override destination must also appear in `accepted_iatas`. The broker checks the file every five seconds and applies valid updates without a restart. Invalid edits are logged and the last valid ACL remains active. Add `TEST` to `accepted_iatas` if you need the existing test topic region.
 
 Edit `.env`:
 

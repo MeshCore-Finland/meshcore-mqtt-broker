@@ -1,4 +1,6 @@
-acceptedIatas:
+version: 1
+
+accepted_iatas:
   - HEL
   - JOE
   - KOK
@@ -9,5 +11,12 @@ acceptedIatas:
   - TLL
   - TMP
 
-# Observer public keys to reject, in 64-character hexadecimal form.
-blockedObservers: []
+# Observer options, keyed by 64-character hexadecimal public key.
+observers: {}
+
+# Example options:
+# observers:
+#   "<64-character-public-key>":
+#     blacklist: true
+#   "<another-64-character-public-key>":
+#     override_iata: RVN

@@ -5,7 +5,12 @@ import { parse } from 'yaml';
 
 export interface AccessControlSnapshot {
   acceptedIatas: Set<string>;
-  blockedObservers: Set<string>;
+  observers: Map<string, ObserverOptions>;
+}
+
+export interface ObserverOptions {
+  blacklist: boolean;
+  override_iata?: string;
 }
 
 function isKnownIata(code: string): boolean {
@@ -27,44 +32,83 @@ function parseAccessControl(contents: string): AccessControlSnapshot {
 
   const value = document as Record<string, unknown>;
   const unknownKeys = Object.keys(value).filter(
-    key => key !== 'acceptedIatas' && key !== 'blockedObservers',
+    key => key !== 'version' && key !== 'accepted_iatas' && key !== 'observers',
   );
   if (unknownKeys.length > 0) {
     throw new Error(`Unknown ACL field(s): ${unknownKeys.join(', ')}`);
   }
 
-  if (!Array.isArray(value.acceptedIatas)) {
-    throw new Error('acceptedIatas must be a YAML list');
+  if (value.version !== 1) {
+    throw new Error('ACL version must be 1');
   }
-  if (value.blockedObservers !== undefined && !Array.isArray(value.blockedObservers)) {
-    throw new Error('blockedObservers must be a YAML list');
+  if (!Array.isArray(value.accepted_iatas)) {
+    throw new Error('accepted_iatas must be a YAML list');
+  }
+  if (value.observers !== undefined &&
+      (value.observers === null || typeof value.observers !== 'object' || Array.isArray(value.observers))) {
+    throw new Error('observers must be a YAML mapping');
   }
 
   const acceptedIatas = new Set<string>();
-  for (const item of value.acceptedIatas) {
+  for (const item of value.accepted_iatas) {
     if (typeof item !== 'string') {
-      throw new Error('Every acceptedIatas entry must be a string');
+      throw new Error('Every accepted_iatas entry must be a string');
     }
     const code = item.trim().toUpperCase();
     if (!/^[A-Z]{3}$/.test(code) || !isKnownIata(code)) {
-      throw new Error(`Invalid IATA in acceptedIatas: ${item}`);
+      throw new Error(`Invalid IATA in accepted_iatas: ${item}`);
     }
     acceptedIatas.add(code);
   }
 
-  const blockedObservers = new Set<string>();
-  for (const item of (value.blockedObservers || []) as unknown[]) {
-    if (typeof item !== 'string') {
-      throw new Error('Every blockedObservers entry must be a string');
-    }
-    const publicKey = item.trim().toUpperCase();
+  const observers = new Map<string, ObserverOptions>();
+  const observerConfiguration = value.observers as Record<string, unknown> | undefined;
+  for (const [rawPublicKey, rawOptions] of Object.entries(observerConfiguration || {})) {
+    const publicKey = rawPublicKey.trim().toUpperCase();
     if (!/^[0-9A-F]{64}$/.test(publicKey)) {
-      throw new Error(`Invalid observer public key in blockedObservers: ${item}`);
+      throw new Error(`Invalid observer public key: ${rawPublicKey}`);
     }
-    blockedObservers.add(publicKey);
+    if (observers.has(publicKey)) {
+      throw new Error(`Duplicate observer public key: ${publicKey.substring(0, 8)}`);
+    }
+
+    if (!rawOptions || typeof rawOptions !== 'object' || Array.isArray(rawOptions)) {
+      throw new Error(`Options for observer ${publicKey.substring(0, 8)} must be a YAML mapping`);
+    }
+
+    const options = rawOptions as Record<string, unknown>;
+    const unknownOptions = Object.keys(options).filter(
+      key => key !== 'blacklist' && key !== 'override_iata',
+    );
+    if (unknownOptions.length > 0) {
+      throw new Error(`Unknown option(s) for observer ${publicKey.substring(0, 8)}: ${unknownOptions.join(', ')}`);
+    }
+
+    if (options.blacklist !== undefined && typeof options.blacklist !== 'boolean') {
+      throw new Error(`blacklist for observer ${publicKey.substring(0, 8)} must be true or false`);
+    }
+
+    let overrideIata: string | undefined;
+    if (options.override_iata !== undefined) {
+      if (typeof options.override_iata !== 'string') {
+        throw new Error(`override_iata for observer ${publicKey.substring(0, 8)} must be an IATA string`);
+      }
+      overrideIata = options.override_iata.trim().toUpperCase();
+      if (!/^[A-Z]{3}$/.test(overrideIata) || !isKnownIata(overrideIata)) {
+        throw new Error(`Invalid override_iata for observer ${publicKey.substring(0, 8)}: ${options.override_iata}`);
+      }
+      if (!acceptedIatas.has(overrideIata)) {
+        throw new Error(`override_iata ${overrideIata} for observer ${publicKey.substring(0, 8)} is not in accepted_iatas`);
+      }
+    }
+
+    observers.set(publicKey, {
+      blacklist: options.blacklist === true,
+      ...(overrideIata ? { override_iata: overrideIata } : {}),
+    });
   }
 
-  return { acceptedIatas, blockedObservers };
+  return { acceptedIatas, observers };
 }
 
 function contentHash(contents: string): string {
@@ -81,9 +125,10 @@ export class AccessControl {
     const contents = readFileSync(filePath, 'utf8');
     this.snapshot = parseAccessControl(contents);
     this.appliedHash = contentHash(contents);
+    const blockedCount = [...this.snapshot.observers.values()].filter(observer => observer.blacklist).length;
     console.log(
       `[ACL] Loaded ${this.snapshot.acceptedIatas.size} accepted IATA(s) and ` +
-      `${this.snapshot.blockedObservers.size} blocked observer(s) from ${filePath}`,
+      `${blockedCount} blocked observer(s) from ${filePath}`,
     );
   }
 
@@ -92,7 +137,11 @@ export class AccessControl {
   }
 
   isObserverBlocked(publicKey: string): boolean {
-    return this.snapshot.blockedObservers.has(publicKey.toUpperCase());
+    return this.snapshot.observers.get(publicKey.toUpperCase())?.blacklist === true;
+  }
+
+  getIataOverride(publicKey: string): string | undefined {
+    return this.snapshot.observers.get(publicKey.toUpperCase())?.override_iata;
   }
 
   reload(): string[] {
@@ -126,16 +175,19 @@ export class AccessControl {
       return [];
     }
 
-    const newlyBlocked = [...next.blockedObservers].filter(
-      publicKey => !this.snapshot.blockedObservers.has(publicKey),
-    );
+    const newlyBlocked = [...next.observers.entries()]
+      .filter(([publicKey, options]) =>
+        options.blacklist && this.snapshot.observers.get(publicKey)?.blacklist !== true,
+      )
+      .map(([publicKey]) => publicKey);
+    const blockedCount = [...next.observers.values()].filter(observer => observer.blacklist).length;
     this.snapshot = next;
     this.appliedHash = hash;
     this.rejectedHash = '';
     this.lastReadError = '';
     console.log(
       `[ACL] Reloaded ${next.acceptedIatas.size} accepted IATA(s) and ` +
-      `${next.blockedObservers.size} blocked observer(s)`,
+      `${blockedCount} blocked observer(s)`,
     );
     return newlyBlocked;
   }
